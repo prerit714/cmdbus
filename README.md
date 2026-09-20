@@ -23,13 +23,37 @@ only, no database, no network, no background service.
 > permissions. It is a deliberate hole in the sandbox. Only run it against a folder shared
 > with a sandbox you would trust with your shell, and stop it (Ctrl-C) when you are done.
 
+## Install
+
+The install scripts clone this repository, build the binary and add it to your user PATH.
+They need `git` and Go 1.21+. The repository is private, so git must be able to reach it
+(an SSH key or a credential helper).
+
+Linux / macOS:
+
+```sh
+sh install.sh
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+|               | source                         | binary                         | PATH is added to                          |
+|---------------|--------------------------------|--------------------------------|-------------------------------------------|
+| `install.sh`  | `~/.local/share/cmdbus`        | `~/.local/bin/cmdbus`          | `~/.bashrc`, `~/.zshrc`, fish config or `~/.profile` |
+| `install.ps1` | `%LOCALAPPDATA%\cmdbus\src`    | `%LOCALAPPDATA%\cmdbus\bin`    | the user `Path` environment variable      |
+
+Override with `CMDBUS_REPO`, `CMDBUS_SRC` and `CMDBUS_BIN`. Running a script again updates
+the clone and rebuilds. To build by hand instead: `go build -o cmdbus .`
+
 ## Quick start
 
 ```sh
-go build -o cmdbus .          # Go 1.21+; Linux or macOS
-
 cd /path/to/your/repo
-/path/to/cmdbus               # runs in the foreground; Ctrl-C stops it
+cmdbus                        # runs in the foreground; Ctrl-C stops it
 ```
 
 From anywhere that can see the folder (the sandbox, or a second terminal):
@@ -53,8 +77,17 @@ Add `.cmdbus/` to the repo's `.gitignore`.
 | `-dir`     | `.cmdbus` | folder holding `inbox.jsonl`, `outbox.jsonl`, `cmdbus.log` |
 | `-timeout` | `5m`      | time limit per command                                    |
 
-Commands run with `sh -c` in the directory cmdbus was started from. The folder and files
-are created on start if missing.
+Commands run with `sh -c` (on Windows: `powershell -NoProfile -NonInteractive`) in the
+directory cmdbus was started from. The folder and files are created on start if missing.
+
+### Exporting this documentation
+
+The binary carries this whole document. Print it, or write it where the AI can read it:
+
+```sh
+cmdbus docs                   # markdown on stdout
+cmdbus docs > CMDBUS.md
+```
 
 ## Protocol
 
@@ -67,7 +100,8 @@ To run a command on the host, append **one line** to `.cmdbus/inbox.jsonl`:
 ```
 
 - `id` — any string you have not used before. A reused id is ignored.
-- `cmd` — a shell command, run with `sh -c` from the repository root on the host.
+- `cmd` — a shell command for the host's shell (`sh` on Linux/macOS, PowerShell on
+  Windows), run from the directory cmdbus was started in — normally the repository root.
 - The line must be valid JSON and must end with a newline.
 - Never write to `outbox.jsonl`.
 
@@ -142,7 +176,8 @@ tail -f .cmdbus/cmdbus.log | jq
 
 ## Limits
 
-- Unix only (uses process groups and `sh`).
+- Windows support compiles but has not been run on a Windows machine yet; the test suite
+  is Unix only.
 - Commands get no stdin and no TTY; interactive programs will not work.
 - One command at a time. A long-running command blocks the ones behind it until it
   finishes or hits `-timeout`.
@@ -164,6 +199,8 @@ the log format. Run them after every change; all of them must pass.
 
 | file             | contents                                             |
 |------------------|------------------------------------------------------|
-| `main.go`        | flags, logger, signal handling                       |
-| `daemon.go`      | inbox/outbox handling, poll loop, recovery, exec     |
-| `daemon_test.go` | end-to-end tests                                     |
+| `main.go`                          | flags, `docs` command, logger, signal handling   |
+| `daemon.go`                        | inbox/outbox handling, poll loop, recovery, exec |
+| `proc_unix.go` / `proc_windows.go` | how a command is started and killed per OS       |
+| `daemon_test.go`, `main_test.go`   | end-to-end tests                                 |
+| `install.sh` / `install.ps1`       | clone, build, add to PATH                        |

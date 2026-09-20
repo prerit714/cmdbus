@@ -1,3 +1,17 @@
+// This file is the whole daemon.
+//
+// How it works:
+//
+//   - The sandbox appends requests to inbox.jsonl; only the daemon writes
+//     outbox.jsonl. One writer per file, so nothing is ever locked.
+//   - The outbox is the only state. An id that appears in it has been handled
+//     and is never run again. On start everything is rebuilt from the files.
+//   - Every poll the whole inbox is re-read (it may have been rewritten, not
+//     just appended to) and each request whose id is not in the outbox runs,
+//     one at a time, in file order.
+//   - For each request the daemon appends a "started" line, runs the command,
+//     then appends the final line. If the daemon dies in between, the next
+//     daemon closes that id as "interrupted" instead of running it twice.
 package main
 
 import (
@@ -12,23 +26,27 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
+// File names inside Config.Dir.
 const (
 	inboxName  = "inbox.jsonl"
 	outboxName = "outbox.jsonl"
 	logName    = "cmdbus.log"
-
-	statusStarted     = "started"
-	statusDone        = "done"
-	statusFailed      = "failed"
-	statusTimeout     = "timeout"
-	statusInterrupted = "interrupted"
 )
 
-// Request is one line of inbox.jsonl.
+// Values of the "status" field in the outbox. Every id gets statusStarted
+// followed by exactly one of the others.
+const (
+	statusStarted     = "started"
+	statusDone        = "done"        // exit code 0
+	statusFailed      = "failed"      // non-zero exit code, or could not start
+	statusTimeout     = "timeout"     // killed after Config.Timeout
+	statusInterrupted = "interrupted" // daemon stopped or died mid-command
+)
+
+// Request is one line of inbox.jsonl. Both fields are required.
 type Request struct {
 	ID  string `json:"id"`
 	Cmd string `json:"cmd"`
@@ -46,15 +64,17 @@ type Started struct {
 type Result struct {
 	ID         string `json:"id"`
 	Status     string `json:"status"`
-	Exit       int    `json:"exit"`
+	Exit       int    `json:"exit"` // -1 when there is no exit code (killed, never started)
 	DurationMS int64  `json:"duration_ms"`
-	Output     string `json:"output"`
-	Truncated  bool   `json:"truncated"`
-	Time       string `json:"time"`
+	Output     string `json:"output"`    // stdout and stderr combined, valid UTF-8
+	Truncated  bool   `json:"truncated"` // Output hit Config.MaxOutput
+	Time       string `json:"time"`      // RFC 3339, UTC; when the line was written
 }
 
+// Config is everything Run needs. The command line only exposes Dir and
+// Timeout; Poll and MaxOutput are fields so that tests can shrink them.
 type Config struct {
-	Dir       string
+	Dir       string        // holds the inbox, the outbox and the log
 	Timeout   time.Duration // per command
 	Poll      time.Duration // inbox check interval
 	MaxOutput int           // bytes of output kept per command
@@ -74,11 +94,12 @@ func newLogger(dir string, w io.Writer) (*slog.Logger, io.Closer, error) {
 	return slog.New(slog.NewJSONHandler(io.MultiWriter(w, f), nil)), f, nil
 }
 
+// daemon is the state of one Run call. It is used from a single goroutine.
 type daemon struct {
 	cfg     Config
 	log     *slog.Logger
-	inbox   string
-	outbox  *os.File
+	inbox   string          // path; re-read on every poll
+	outbox  *os.File        // opened once with O_APPEND
 	handled map[string]bool // IDs present in the outbox
 	warned  map[string]bool // bad inbox lines already logged
 }
@@ -96,6 +117,7 @@ func Run(ctx context.Context, cfg Config) error {
 		handled: map[string]bool{},
 		warned:  map[string]bool{},
 	}
+	// Create the inbox if missing so the sandbox has a file to append to.
 	f, err := os.OpenFile(d.inbox, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
@@ -110,6 +132,7 @@ func Run(ctx context.Context, cfg Config) error {
 	cwd, _ := os.Getwd()
 	d.log.Info("daemon_start", "dir", cfg.Dir, "cwd", cwd, "timeout", cfg.Timeout.String(), "pid", os.Getpid())
 
+	// Process first, then wait: requests already in the inbox run at once.
 	ticker := time.NewTicker(cfg.Poll)
 	defer ticker.Stop()
 	for {
@@ -145,8 +168,10 @@ func (d *daemon) openOutbox() error {
 		}
 	}
 
-	last := map[string]string{} // id -> last status
-	var order []string
+	// Only id and status matter here, and Started has both. Lines that do
+	// not parse (a torn write) are ignored.
+	last := map[string]string{} // id -> status of its last line
+	var order []string          // ids in first-seen order, for stable recovery output
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		var s Started
 		if json.Unmarshal(line, &s) != nil || s.ID == "" {
@@ -187,7 +212,7 @@ func (d *daemon) processInbox(ctx context.Context) error {
 
 	for i, line := range lines {
 		if ctx.Err() != nil {
-			return nil
+			return nil // shutting down: start nothing new
 		}
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -201,6 +226,7 @@ func (d *daemon) processInbox(ctx context.Context) error {
 			reason = `"id" and "cmd" are required`
 		}
 		if reason != "" {
+			// Log a bad line once, not on every poll.
 			if !d.warned[string(line)] {
 				d.warned[string(line)] = true
 				d.log.Warn("inbox_bad_line", "line", i+1, "reason", reason)
@@ -220,6 +246,8 @@ func (d *daemon) processInbox(ctx context.Context) error {
 // execute runs one request. The returned error is only about the outbox:
 // if results cannot be recorded, the daemon must stop.
 func (d *daemon) execute(ctx context.Context, req Request) error {
+	// Record "started" before running: from here on this id is never run
+	// again, even if the daemon is killed before the command finishes.
 	start := time.Now()
 	if err := d.appendOutbox(&Started{ID: req.ID, Status: statusStarted, Time: start.UTC().Format(time.RFC3339)}); err != nil {
 		return err
@@ -231,13 +259,11 @@ func (d *daemon) execute(ctx context.Context, req Request) error {
 	defer cancel()
 
 	out := &cappedBuffer{max: d.cfg.MaxOutput}
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", req.Cmd)
+	cmd := shellCommand(cmdCtx, req.Cmd) // proc_unix.go / proc_windows.go
 	cmd.Stdout = out
 	cmd.Stderr = out
-	// Own process group: the terminal's Ctrl-C reaches only the daemon, and
-	// the daemon can kill the command together with everything it spawned.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// If the command leaves a background child holding its output pipe, do
+	// not wait for that child: give up 2s after the shell itself has exited.
 	cmd.WaitDelay = 2 * time.Second
 
 	runErr := cmd.Run()
@@ -246,16 +272,21 @@ func (d *daemon) execute(ctx context.Context, req Request) error {
 	if cmd.ProcessState != nil {
 		res.Exit = cmd.ProcessState.ExitCode()
 	}
+	// A clean exit wins even if a timeout or Ctrl-C raced with it: the
+	// command did complete. Otherwise the daemon's own shutdown explains a
+	// kill before the per-command timeout does.
 	switch {
 	case res.Exit == 0:
 		res.Status = statusDone
 	case ctx.Err() != nil:
-		res.Status = statusInterrupted
+		res.Status, res.Exit = statusInterrupted, -1
 	case cmdCtx.Err() != nil:
-		res.Status = statusTimeout
+		res.Status, res.Exit = statusTimeout, -1
 	default:
 		res.Status = statusFailed
 	}
+	// Errors other than a plain non-zero exit (shell missing, WaitDelay
+	// expired, ...) would otherwise be invisible to the requester.
 	var exitErr *exec.ExitError
 	if runErr != nil && !errors.As(runErr, &exitErr) {
 		fmt.Fprintf(&out.buf, "cmdbus: %v\n", runErr)
@@ -276,9 +307,11 @@ func (d *daemon) appendOutbox(v any) error {
 	if r, ok := v.(*Result); ok && r.Time == "" {
 		r.Time = time.Now().UTC().Format(time.RFC3339)
 	}
+	// Encode into memory first so the file sees one write of one full line;
+	// a reader never finds half a line unless the daemon is killed mid-write.
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
+	enc.SetEscapeHTML(false) // keep <, > and & readable in command output
 	if err := enc.Encode(v); err != nil {
 		return err
 	}
@@ -296,6 +329,8 @@ type cappedBuffer struct {
 	truncated bool
 }
 
+// Write always reports success: returning a short write or an error would make
+// os/exec stop draining the pipe and the command could block on a full pipe.
 func (c *cappedBuffer) Write(p []byte) (int, error) {
 	room := c.max - c.buf.Len()
 	if room < len(p) {
