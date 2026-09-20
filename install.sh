@@ -2,16 +2,16 @@
 # Install cmdbus: clone (or update) the source, build it, put it on your PATH.
 #
 #   sh install.sh
+#   curl -fsSL https://raw.githubusercontent.com/prerit714/cmdbus/master/install.sh | sh
 #
-# The repository is private, so git must be able to reach it (SSH key or a
-# credential helper). Override any of these with environment variables:
+# Override any of these with environment variables:
 #
-#   CMDBUS_REPO  git URL to clone       (default: git@github.com:prerit714/cmdbus.git)
+#   CMDBUS_REPO  git URL to clone       (default: https://github.com/prerit714/cmdbus.git)
 #   CMDBUS_SRC   where the source goes  (default: ~/.local/share/cmdbus)
 #   CMDBUS_BIN   where the binary goes  (default: ~/.local/bin)
 set -eu
 
-REPO="${CMDBUS_REPO:-git@github.com:prerit714/cmdbus.git}"
+REPO="${CMDBUS_REPO:-https://github.com/prerit714/cmdbus.git}"
 SRC="${CMDBUS_SRC:-$HOME/.local/share/cmdbus}"
 BIN="${CMDBUS_BIN:-$HOME/.local/bin}"
 

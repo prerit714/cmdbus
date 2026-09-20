@@ -2,11 +2,11 @@
 # your user PATH.
 #
 #   powershell -ExecutionPolicy Bypass -File install.ps1
+#   irm https://raw.githubusercontent.com/prerit714/cmdbus/master/install.ps1 | iex
 #
-# The repository is private, so git must be able to reach it (SSH key or a
-# credential helper). Override any of these with environment variables:
+# Override any of these with environment variables:
 #
-#   CMDBUS_REPO  git URL to clone       (default: git@github.com:prerit714/cmdbus.git)
+#   CMDBUS_REPO  git URL to clone       (default: https://github.com/prerit714/cmdbus.git)
 #   CMDBUS_SRC   where the source goes  (default: %LOCALAPPDATA%\cmdbus\src)
 #   CMDBUS_BIN   where the binary goes  (default: %LOCALAPPDATA%\cmdbus\bin)
 #
@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 
 if (-not $env:LOCALAPPDATA) { throw 'install.ps1 is for Windows; on Linux and macOS run install.sh' }
 
-$Repo = if ($env:CMDBUS_REPO) { $env:CMDBUS_REPO } else { 'git@github.com:prerit714/cmdbus.git' }
+$Repo = if ($env:CMDBUS_REPO) { $env:CMDBUS_REPO } else { 'https://github.com/prerit714/cmdbus.git' }
 $Src  = if ($env:CMDBUS_SRC)  { $env:CMDBUS_SRC }  else { Join-Path $env:LOCALAPPDATA 'cmdbus\src' }
 $Bin  = if ($env:CMDBUS_BIN)  { $env:CMDBUS_BIN }  else { Join-Path $env:LOCALAPPDATA 'cmdbus\bin' }
 

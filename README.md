@@ -26,20 +26,21 @@ only, no database, no network, no background service.
 ## Install
 
 The install scripts clone this repository, build the binary and add it to your user PATH.
-They need `git` and Go 1.21+. The repository is private, so git must be able to reach it
-(an SSH key or a credential helper).
+They need `git` and Go 1.21+.
 
 Linux / macOS:
 
 ```sh
-sh install.sh
+curl -fsSL https://raw.githubusercontent.com/prerit714/cmdbus/master/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+irm https://raw.githubusercontent.com/prerit714/cmdbus/master/install.ps1 | iex
 ```
+
+Or, from a checkout: `sh install.sh` / `powershell -ExecutionPolicy Bypass -File install.ps1`.
 
 |               | source                         | binary                         | PATH is added to                          |
 |---------------|--------------------------------|--------------------------------|-------------------------------------------|
